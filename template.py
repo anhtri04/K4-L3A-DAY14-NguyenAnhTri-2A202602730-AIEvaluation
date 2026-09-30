@@ -689,8 +689,11 @@ class FailureAnalyzer:
             dict mapping failure_type → count.
             Example: {"hallucination": 3, "irrelevant": 2, "incomplete": 5}
         """
-        # TODO
-        raise NotImplementedError("Implement categorize_failures")
+        categories: dict[str, int] = {}
+        for failure in failures:
+            key = failure.failure_type or "unknown"
+            categories[key] = categories.get(key, 0) + 1
+        return categories
 
     def find_root_cause(self, failure: EvalResult) -> str:
         """
@@ -702,8 +705,24 @@ class FailureAnalyzer:
             "Answer is missing key information — increase context window or improve generation"
             "Multiple issues detected — review full pipeline"
         """
-        # TODO: compare faithfulness, relevance, completeness, return appropriate string
-        raise NotImplementedError("Implement find_root_cause")
+        scores = {
+            "faithfulness": failure.faithfulness,
+            "relevance": failure.relevance,
+            "completeness": failure.completeness,
+        }
+        lowest = min(scores.values())
+        lowest_metrics = [name for name, score in scores.items() if score == lowest]
+        if len(lowest_metrics) != 1:
+            return "Multiple issues detected — review full pipeline"
+
+        return {
+            "faithfulness": "Context is missing or irrelevant — improve retrieval",
+            "relevance": "Answer does not address the question — improve prompt clarity",
+            "completeness": (
+                "Answer is missing key information — increase context window or "
+                "improve generation"
+            ),
+        }[lowest_metrics[0]]
 
     def generate_improvement_log(self, failures: list, suggestions: list[str]) -> str:
         """Generate a Markdown table logging failures and improvement actions.
@@ -722,7 +741,21 @@ class FailureAnalyzer:
 
         TODO: Build markdown table with failure details + matched suggestions
         """
-        raise NotImplementedError
+        lines = [
+            "| Failure ID | Type | Root Cause | Suggested Fix | Status |",
+            "|------------|------|------------|---------------|--------|",
+        ]
+        for index, failure in enumerate(failures, start=1):
+            failure_id = f"F{index:03d}"
+            failure_type = failure.failure_type or "unknown"
+            cause = self.find_root_cause(failure)
+            fix = (
+                suggestions[index - 1]
+                if index - 1 < len(suggestions)
+                else "Investigate and add a regression test"
+            )
+            lines.append(f"| {failure_id} | {failure_type} | {cause} | {fix} | Open |")
+        return "\n".join(lines)
 
     def generate_improvement_suggestions(
         self, failures: list[EvalResult]
@@ -740,8 +773,48 @@ class FailureAnalyzer:
         Returns:
             List of at least 3 suggestion strings (or fewer if failures is empty).
         """
-        # TODO: analyze categorized failures and return suggestions
-        raise NotImplementedError("Implement generate_improvement_suggestions")
+        if not failures:
+            return []
+
+        category_suggestions = {
+            "hallucination": (
+                "Add a grounding guardrail that rejects claims unsupported by "
+                "the retrieved context"
+            ),
+            "irrelevant": (
+                "Clarify the system prompt so answers directly address the "
+                "customer's question intent"
+            ),
+            "incomplete": (
+                "Increase retrieval top-k or chunk size and add few-shot "
+                "examples of complete answers"
+            ),
+            "off_topic": (
+                "Improve intent detection and routing so replies stay within "
+                "the customer-support scope"
+            ),
+            "refusal": (
+                "Relax over-strict guardrails so in-scope questions are answered"
+            ),
+        }
+
+        categorized = self.categorize_failures(failures)
+        suggestions = [
+            suggestion
+            for category, suggestion in category_suggestions.items()
+            if categorized.get(category)
+        ]
+
+        fallbacks = [
+            "Expand the golden dataset with more cases from weak categories",
+            "Add an automated evaluation quality gate to CI before deployment",
+            "Profile chunking and embedding quality to reduce retrieval noise",
+        ]
+        for fallback in fallbacks:
+            if len(suggestions) >= 3:
+                break
+            suggestions.append(fallback)
+        return suggestions
 
 
 # ---------------------------------------------------------------------------
