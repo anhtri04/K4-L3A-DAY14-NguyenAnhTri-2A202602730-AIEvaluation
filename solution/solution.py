@@ -25,6 +25,7 @@ The reranking helper is an optional bonus exercise and may remain unimplemented.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -378,8 +379,7 @@ class LLMJudge:
     """
 
     def __init__(self, judge_llm_fn: Callable[[str], str]) -> None:
-        # TODO: store judge_llm_fn
-        pass
+        self.judge_llm_fn = judge_llm_fn
 
     def score_response(
         self,
@@ -411,8 +411,38 @@ class LLMJudge:
                 "reasoning": str,               # raw LLM explanation
             }
         """
-        # TODO
-        raise NotImplementedError("Implement score_response")
+        criteria = "\n".join(
+            f"- {name}: {description}" for name, description in rubric.items()
+        )
+        prompt = (
+            "You are a strict evaluation judge. Score the answer against each "
+            "rubric criterion on a scale from 0.0 to 1.0.\n\n"
+            f"Question:\n{question}\n\n"
+            f"Answer:\n{answer}\n\n"
+            f"Rubric criteria:\n{criteria}\n\n"
+            "Return ONLY a JSON object mapping each criterion name to its "
+            "numeric score, for example {\"accuracy\": 0.8}."
+        )
+
+        raw_response = self.judge_llm_fn(prompt)
+
+        parsed: Any = None
+        match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group())
+            except (ValueError, TypeError):
+                parsed = None
+
+        scores: dict[str, float] = {}
+        for name in rubric:
+            value = parsed.get(name) if isinstance(parsed, dict) else None
+            try:
+                scores[name] = max(0.0, min(1.0, float(value)))
+            except (TypeError, ValueError):
+                scores[name] = 0.5
+
+        return {"scores": scores, "reasoning": raw_response}
 
     def detect_bias(self, scores_batch: list[dict[str, Any]]) -> dict[str, Any]:
         """
@@ -433,8 +463,29 @@ class LLMJudge:
                 "severity_bias":   bool,
             }
         """
-        # TODO
-        raise NotImplementedError("Implement detect_bias")
+        def _response_average(item: dict[str, Any]) -> float:
+            values = list(item.get("scores", {}).values())
+            return sum(values) / len(values) if values else 0.0
+
+        averages = [_response_average(item) for item in scores_batch]
+
+        positional_bias = False
+        if len(averages) >= 2:
+            rest_mean = sum(averages[1:]) / len(averages[1:])
+            positional_bias = averages[0] > rest_mean + 0.1
+
+        all_scores = [
+            value
+            for item in scores_batch
+            for value in item.get("scores", {}).values()
+        ]
+        overall_average = sum(all_scores) / len(all_scores) if all_scores else 0.0
+
+        return {
+            "positional_bias": positional_bias,
+            "leniency_bias": overall_average > 0.8,
+            "severity_bias": overall_average < 0.3,
+        }
 
 
 # ---------------------------------------------------------------------------
